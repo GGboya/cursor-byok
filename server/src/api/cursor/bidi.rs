@@ -172,10 +172,22 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
     }
     let payload = hex::decode(&request.data)
         .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
+    let message = match agent::AgentClientMessage::decode(payload.as_slice()) {
+        Ok(message) => message,
+        Err(error) => {
+            let _ = std::fs::write("/tmp/byok-fail-append.bin", &payload);
+            tracing::warn!(
+                %error,
+                seqno = request.append_seqno,
+                "dumped undecodable AgentClientMessage to /tmp/byok-fail-append.bin"
+            );
+            return Err(error.into());
+        }
+    };
     Ok(DecodedAppend {
         request_id: request_id.into(),
         seqno: request.append_seqno,
-        message: agent::AgentClientMessage::decode(payload.as_slice())?,
+        message,
     })
 }
 

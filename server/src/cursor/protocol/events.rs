@@ -75,6 +75,7 @@ pub fn turn_ended(usage: Option<Usage>) -> pb::AgentServerMessage {
                 .and_then(|usage| usage.cache_write_tokens.map(|value| value as i64)),
             reasoning_tokens: usage
                 .and_then(|usage| usage.reasoning_tokens.map(|value| value as i64)),
+            ended_at_ms: None,
         },
     ))
 }
@@ -101,7 +102,10 @@ pub fn summary_delta(summary: String) -> pb::AgentServerMessage {
 
 pub fn summary_completed() -> pb::AgentServerMessage {
     server_interaction(pb::interaction_update::Message::SummaryCompleted(
-        pb::SummaryCompletedUpdate { hook_message: None },
+        pb::SummaryCompletedUpdate {
+            hook_message: None,
+            failed: None,
+        },
     ))
 }
 
@@ -165,6 +169,7 @@ pub fn server_interaction(message: pb::interaction_update::Message) -> pb::Agent
         ttft_breakdown: None,
         message: Some(pb::agent_server_message::Message::InteractionUpdate(
             pb::InteractionUpdate {
+                message_started_at_ms: None,
                 message: Some(message),
             },
         )),

@@ -96,6 +96,15 @@ impl CheckpointBuilder {
                     encrypted_model: None,
                     dynamic_tool_count: None,
                     send_message_step_indices: Vec::new(),
+                    routed_model_display_name: None,
+                    subagent_dispatch_steps: Vec::new(),
+                    dynamic_tool_names: Vec::new(),
+                    user_message_id: None,
+                    long_reasoning_reminder: None,
+                    long_reasoning_reminder_exposure_logged: false,
+                    assistant_text_step_indices: Vec::new(),
+                    assistant_text_steps_recorded: None,
+                    app_secrets_request_step_indices: Vec::new(),
                 },
             });
             return Ok(());

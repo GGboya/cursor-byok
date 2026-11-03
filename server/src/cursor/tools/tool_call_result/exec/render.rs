@@ -179,6 +179,7 @@ fn mcp_error(message: &str) -> pb::mcp_tool_result::Result {
     pb::mcp_tool_result::Result::Error(pb::McpToolError {
         error: message.into(),
         read_tool_def_reminder: String::new(),
+        system_reminders: Vec::new(),
     })
 }
 

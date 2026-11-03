@@ -64,6 +64,8 @@ pub(crate) fn complete(
                     }],
                     is_error: false,
                     structured_content,
+                    result_meta: None,
+                    system_reminders: Vec::new(),
                 }),
             )
         }
@@ -73,6 +75,7 @@ pub(crate) fn complete(
             McpResult::Error(pb::McpToolError {
                 error,
                 read_tool_def_reminder: String::new(),
+                system_reminders: Vec::new(),
             }),
         ),
     };

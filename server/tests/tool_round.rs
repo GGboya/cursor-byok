@@ -120,6 +120,9 @@ fn dynamic_mcp_call_routes_to_the_captured_exec_message() {
         description: "lookup".into(),
         input_schema: None,
         input_schema_json: None,
+        output_schema_json: None,
+        annotations_json: None,
+        meta_json: None,
     };
     let message = codec::mcp_request(7, &call, &definition).unwrap();
     let Some(pb::agent_server_message::Message::ExecServerMessage(exec)) = message.message else {
@@ -219,6 +222,8 @@ async fn dynamic_mcp_uses_one_definition_for_stream_ui_exec_and_result() {
                     }],
                     is_error: false,
                     structured_content: None,
+                    result_meta: None,
+                    system_reminders: Vec::new(),
                 })),
             })),
             ..Default::default()
@@ -292,6 +297,7 @@ async fn call_mcp_tool_uses_the_request_descriptor_and_returns_client_errors_to_
             message: Some(pb::exec_client_message::Message::McpResult(pb::McpResult {
                 result: Some(pb::mcp_result::Result::Error(pb::McpError {
                     error: "invalid browser arguments".into(),
+                    ..Default::default()
                 })),
             })),
             ..Default::default()

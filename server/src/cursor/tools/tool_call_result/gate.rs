@@ -783,6 +783,8 @@ mod tests {
                         .collect(),
                     is_error: false,
                     structured_content: None,
+                    result_meta: None,
+                    system_reminders: Vec::new(),
                 })),
             }),
             description: None,

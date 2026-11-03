@@ -14,6 +14,7 @@ use crate::{api::cursor::proxy, Error, Result};
 
 pub const BOOTSTRAP_STATSIG_PATH: &str = "/aiserver.v1.AnalyticsService/BootstrapStatsig";
 const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
+const AGENT_HOST_GATE: &str = "cursor_agent_host";
 const LOCAL_RULE: &str = "local_enabled";
 
 #[derive(Clone, PartialEq, Message)]
@@ -97,7 +98,15 @@ fn local_response() -> Result<Response<Body>> {
 }
 
 fn enable_agent_retries(config: &mut Value) -> Result<()> {
-    let gate_key = statsig_key(config, AGENT_RETRIES_GATE);
+    force_gate(config, AGENT_RETRIES_GATE, true)?;
+    // Cursor 3.27+ routes agent runs through the downloaded agent-host module
+    // (RunInference protocol), which this server cannot serve. Forcing the gate
+    // off keeps the client on the legacy AgentService/RunSSE flow.
+    force_gate(config, AGENT_HOST_GATE, false)
+}
+
+fn force_gate(config: &mut Value, gate: &str, value: bool) -> Result<()> {
+    let gate_key = statsig_key(config, gate);
     let root = config
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig bootstrap config must be an object".into()))?;
@@ -106,7 +115,14 @@ fn enable_agent_retries(config: &mut Value) -> Result<()> {
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig feature_gates must be an object".into()))?;
-    gates.insert(gate_key.clone(), enabled_gate(&gate_key));
+    let rendered = if value {
+        enabled_gate(&gate_key)
+    } else {
+        let mut disabled = enabled_gate(&gate_key);
+        disabled["value"] = Value::Bool(false);
+        disabled
+    };
+    gates.insert(gate_key, rendered);
     Ok(())
 }
 

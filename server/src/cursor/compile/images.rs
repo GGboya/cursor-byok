@@ -62,6 +62,11 @@ async fn image_data(image: &pb::SelectedImage, blobs: &BlobSynchronizer) -> Resu
                 value.data.clone()
             }
         }
+        Some(DataOrBlobId::PromptUploadRef(_)) => {
+            return Err(Error::Protocol(
+                "selected image prompt_upload_ref is not supported".into(),
+            ))
+        }
         None => {
             return Err(Error::Protocol(
                 "selected image is missing data_or_blob_id".into(),

@@ -581,6 +581,8 @@ fn completion_run_with_detail(
                                     tool_call_id: Some("task-call".into()),
                                     ..Default::default()
                                 }],
+                                system_reminder: None,
+                                request_context: None,
                             },
                         ),
                     ),
@@ -620,6 +622,8 @@ fn shell_completion_run(
                                     tool_call_id: Some("shell-call".into()),
                                     ..Default::default()
                                 }],
+                                system_reminder: None,
+                                request_context: None,
                             },
                         ),
                     ),

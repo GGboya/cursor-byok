@@ -49,6 +49,7 @@ pub(crate) fn failure(call: &ToolCall, error: String) -> Result<ToolCompletion> 
                 result: Some(pb::mcp_tool_result::Result::Error(pb::McpToolError {
                     error,
                     read_tool_def_reminder: String::new(),
+                    system_reminders: Vec::new(),
                 })),
             }),
             description: call

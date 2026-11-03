@@ -81,6 +81,7 @@ pub(crate) fn failure_with_message(call: &ToolCall, error: String) -> ToolComple
                 result: Some(pb::mcp_tool_result::Result::Error(pb::McpToolError {
                     error,
                     read_tool_def_reminder: String::new(),
+                    system_reminders: Vec::new(),
                 })),
             }),
             description: Some("Unavailable legacy or unsupported tool".into()),

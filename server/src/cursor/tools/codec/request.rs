@@ -84,6 +84,7 @@ pub fn request(id: u32, call: &ToolCall, context: &ExecContext) -> Result<pb::Ag
                 .and_then(Value::as_u64)
                 .map(|v| v as u32),
             encoding_hint: optional_string("encoding_hint"),
+            digest_only: None,
         }),
         "delete" => Message::DeleteArgs(pb::DeleteArgs {
             path: string_aliased(&["path", "file_path", "filePath"])?,
@@ -158,6 +159,8 @@ pub fn request(id: u32, call: &ToolCall, context: &ExecContext) -> Result<pb::Ag
                 }
             },
             cloud_base_branch: optional_string("cloud_base_branch"),
+            model_parameters: Vec::new(),
+            voice_call_notes: None,
             credentials: None,
         }),
         "fetchmcpresource" => Message::ReadMcpResourceExecArgs(pb::ReadMcpResourceExecArgs {
@@ -236,6 +239,7 @@ fn server_message(
             pb::ExecServerMessage {
                 id,
                 exec_id: call.call_id.clone(),
+                machine_id: None,
                 span_context: None,
                 accept_hook_additional_contexts,
                 message: Some(message),
@@ -260,6 +264,7 @@ pub fn mcp_request(
             pb::ExecServerMessage {
                 id,
                 exec_id: call.call_id.clone(),
+                machine_id: None,
                 span_context: None,
                 accept_hook_additional_contexts: None,
                 message: Some(pb::exec_server_message::Message::McpArgs(pb::McpArgs {
@@ -272,6 +277,8 @@ pub fn mcp_request(
                     smart_mode_approval_only: false,
                     skip_approval: false,
                     server_identifier: String::new(),
+                    symbolic_path_arguments: Vec::new(),
+                    arguments_repaired: false,
                 })),
             },
         )),
@@ -323,6 +330,8 @@ pub(crate) fn mcp_meta_request(
             smart_mode_approval_only: false,
             skip_approval: false,
             server_identifier: server_identifier.into(),
+            symbolic_path_arguments: Vec::new(),
+            arguments_repaired: false,
         }),
         Some(true),
     ))
@@ -341,6 +350,7 @@ pub fn mcp_state_request(id: u32, call: &ToolCall) -> pb::AgentServerMessage {
         pb::exec_server_message::Message::McpStateExecArgs(pb::McpStateExecArgs {
             server_identifiers,
             kick_only: false,
+            refresh_policy: None,
         }),
         Some(false),
     )

@@ -97,7 +97,6 @@ impl CheckpointBuilder {
         }
         details.max_tokens = max_tokens.min(u32::MAX as u64) as u32;
         details.prompt_context_usage_tree = None;
-        details.prompt_context_usage_snapshot_blob_id = None;
     }
 
     pub async fn settled(
