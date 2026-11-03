@@ -225,6 +225,67 @@ async fn run_sse_handler(
     }
 }
 
+/// Serves BidiAppend payloads spoken by Cursor's downloaded agent harness
+/// (RunInferenceClientMessage). BYOK models run against the local provider;
+/// anything else is forwarded to the Cursor upstream like the legacy flow.
+#[allow(clippy::too_many_arguments)]
+async fn runinference_append(
+    State(registry): State<TransportRegistry>,
+    Extension(proxy): Extension<CursorProxy>,
+    parts: axum::http::request::Parts,
+    body: Bytes,
+    request_id: String,
+    seqno: i64,
+    message: crate::cursor::protocol::proto::runinference::v1::RunInferenceClientMessage,
+) -> Result<Response<Body>> {
+    let model_id = crate::cursor::runinference::requested_model_id(&message);
+    let local = if let Some(model) = model_id.as_deref().filter(|model| !model.is_empty()) {
+        if model.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
+            || registry.store().model(model).await?.is_some()
+        {
+            tracing::info!(
+                request_id = request_id,
+                model_id = model,
+                "routing RunInference run to BYOK provider"
+            );
+            true
+        } else {
+            tracing::info!(
+                request_id = request_id,
+                model_id = model,
+                "routing RunInference run to Cursor upstream"
+            );
+            false
+        }
+    } else if registry.local(&request_id).await.is_some() {
+        true
+    } else if registry.upstream(&request_id).await {
+        false
+    } else {
+        return Err(crate::Error::Protocol(
+            "first RunInference BidiAppend message must select a model".into(),
+        ));
+    };
+    if !local {
+        if model_id.is_some() {
+            registry.mark_upstream(&request_id).await;
+        }
+        return proxy::forward(
+            Extension(proxy),
+            Request::from_parts(parts, Body::from(body)),
+        )
+        .await;
+    }
+    crate::cursor::runinference::handle_append(&registry, &request_id, seqno, message).await?;
+    let mut response = Response::new(axum::body::Body::empty());
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/proto"),
+    );
+    Ok(response)
+}
+
 async fn bidi_handler(
     State(registry): State<TransportRegistry>,
     Extension(proxy): Extension<CursorProxy>,
@@ -232,7 +293,25 @@ async fn bidi_handler(
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
-    let decoded = bidi::decode(&request)?;
+    let decoded = match bidi::decode_payload(&request)? {
+        bidi::BidiPayload::Legacy(decoded) => decoded,
+        bidi::BidiPayload::RunInference {
+            request_id,
+            seqno,
+            message,
+        } => {
+            return runinference_append(
+                State(registry),
+                Extension(proxy),
+                parts,
+                body,
+                request_id,
+                seqno,
+                message,
+            )
+            .await;
+        }
+    };
     let first_model = decoded.model_id().map(str::to_owned);
     let conversation_id = decoded.conversation_id().map(str::to_owned);
     let trace_metadata = decoded.trace_metadata();
@@ -390,3 +469,4 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>
         .transpose()
         .map_err(|error| crate::Error::Protocol(format!("invalid {name} header: {error}")))
 }
+

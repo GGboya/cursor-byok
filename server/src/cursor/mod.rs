@@ -5,6 +5,7 @@ pub mod compile;
 pub mod conversation;
 pub mod prompting;
 pub mod protocol;
+pub mod runinference;
 pub mod services;
 pub mod tools;
 pub mod transport;

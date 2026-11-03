@@ -99,10 +99,10 @@ fn local_response() -> Result<Response<Body>> {
 
 fn enable_agent_retries(config: &mut Value) -> Result<()> {
     force_gate(config, AGENT_RETRIES_GATE, true)?;
-    // Cursor 3.27+ routes agent runs through the downloaded agent-host module
-    // (RunInference protocol), which this server cannot serve. Forcing the gate
-    // off keeps the client on the legacy AgentService/RunSSE flow.
-    force_gate(config, AGENT_HOST_GATE, false)
+    // This server implements both agent protocols. Forcing the agent-host gate
+    // on keeps Cursor on the RunInference path deterministically instead of
+    // depending on Statsig rollout state.
+    force_gate(config, AGENT_HOST_GATE, true)
 }
 
 fn force_gate(config: &mut Value, gate: &str, value: bool) -> Result<()> {

@@ -19,6 +19,17 @@ pub struct DecodedAppend {
     pub message: agent::AgentClientMessage,
 }
 
+/// A decoded BidiAppend payload: the legacy AgentClientMessage or the
+/// RunInferenceClientMessage spoken by Cursor's downloaded agent harness.
+pub enum BidiPayload {
+    Legacy(DecodedAppend),
+    RunInference {
+        request_id: String,
+        seqno: i64,
+        message: crate::cursor::protocol::proto::runinference::v1::RunInferenceClientMessage,
+    },
+}
+
 impl DecodedAppend {
     pub fn model_id(&self) -> Option<&str> {
         let agent::agent_client_message::Message::RunRequest(request) =
@@ -154,6 +165,17 @@ fn history_image_count(history: &agent::ConversationHistory) -> usize {
 }
 
 pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
+    match decode_payload(request)? {
+        BidiPayload::Legacy(legacy) => Ok(legacy),
+        BidiPayload::RunInference { .. } => Err(Error::Protocol(
+            "BidiAppend payload is RunInference, not a legacy AgentClientMessage".into(),
+        )),
+    }
+}
+
+/// Decodes a BidiAppend payload, trying the legacy AgentClientMessage first
+/// and falling back to the agent-harness RunInferenceClientMessage.
+pub fn decode_payload(request: &ai::BidiAppendRequest) -> Result<BidiPayload> {
     let request_id = request
         .request_id
         .as_ref()
@@ -172,23 +194,34 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
     }
     let payload = hex::decode(&request.data)
         .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
-    let message = match agent::AgentClientMessage::decode(payload.as_slice()) {
-        Ok(message) => message,
-        Err(error) => {
+    let request_id = request_id.to_owned();
+    if let Ok(message) = agent::AgentClientMessage::decode(payload.as_slice()) {
+        return Ok(BidiPayload::Legacy(DecodedAppend {
+            request_id,
+            seqno: request.append_seqno,
+            message,
+        }));
+    }
+    match crate::cursor::protocol::proto::runinference::v1::RunInferenceClientMessage::decode(
+        payload.as_slice(),
+    ) {
+        Ok(message) => Ok(BidiPayload::RunInference {
+            request_id,
+            seqno: request.append_seqno,
+            message,
+        }),
+        Err(runinference_error) => {
             let _ = std::fs::write("/tmp/byok-fail-append.bin", &payload);
             tracing::warn!(
-                %error,
+                error = %runinference_error,
                 seqno = request.append_seqno,
-                "dumped undecodable AgentClientMessage to /tmp/byok-fail-append.bin"
+                "dumped undecodable BidiAppend payload to /tmp/byok-fail-append.bin"
             );
-            return Err(error.into());
+            Err(Error::Protocol(format!(
+                "invalid BidiAppend payload: {runinference_error}"
+            )))
         }
-    };
-    Ok(DecodedAppend {
-        request_id: request_id.into(),
-        seqno: request.append_seqno,
-        message,
-    })
+    }
 }
 
 pub async fn append(

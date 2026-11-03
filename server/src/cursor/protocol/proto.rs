@@ -6,6 +6,13 @@ pub mod agent {
     }
 }
 
+pub mod runinference {
+    #[allow(clippy::large_enum_variant)]
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/cursor.runinference.v1.rs"));
+    }
+}
+
 pub mod aiserver {
     pub mod v1 {
         #[derive(Clone, PartialEq, ::prost::Message)]

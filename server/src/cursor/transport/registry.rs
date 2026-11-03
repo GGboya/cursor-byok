@@ -135,6 +135,11 @@ impl TransportRegistry {
         &self.inner.store
     }
 
+    /// Provider used to serve BYOK model calls; shared with the conversation runtime.
+    pub fn provider(&self) -> std::sync::Arc<dyn Provider> {
+        self.inner.conversations.dependencies().provider.clone()
+    }
+
     pub fn trace(
         &self,
         request_id: &str,
