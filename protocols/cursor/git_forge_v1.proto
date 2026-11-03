@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package git_forge.v1;
 
-option go_package = "github.com/leookun/cursor-byok/cursor-proto/gen/git_forge/v1;git_forgev1";
+option go_package = "github.com/GGboya/cursor-byok/cursor-proto/gen/git_forge/v1;git_forgev1";
 
 // Copied from: local:git_forge.v1.BatchGetBlobOidsRequest (var: Gn)
 message BatchGetBlobOidsRequest {

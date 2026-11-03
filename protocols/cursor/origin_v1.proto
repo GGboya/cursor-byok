@@ -5,7 +5,7 @@ package origin.v1;
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/leookun/cursor-byok/cursor-proto/gen/origin/v1;originv1";
+option go_package = "github.com/GGboya/cursor-byok/cursor-proto/gen/origin/v1;originv1";
 
 // Copied from: local:origin.v1.ActorWithDisplay (var: x4e)
 message ActorWithDisplay {

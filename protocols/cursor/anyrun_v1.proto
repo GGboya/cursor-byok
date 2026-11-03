@@ -4,7 +4,7 @@ package anyrun.v1;
 
 import "google/protobuf/empty.proto";
 
-option go_package = "github.com/leookun/cursor-byok/cursor-proto/gen/anyrun/v1;anyrunv1";
+option go_package = "github.com/GGboya/cursor-byok/cursor-proto/gen/anyrun/v1;anyrunv1";
 
 // Copied from: local:anyrun.v1.AllowedDomain (var: kt)
 message AllowedDomain {

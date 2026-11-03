@@ -35,7 +35,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1MEY2RjQzRjA0MjhCMDUKUldRRmkwTHdRMjhQZGJJam9zT1NwcW83L1V4ckJvbkQzQ0FYVFZ6MGRpa1N2NVFkUHk1dW14c1AK",
       "endpoints": [
-        "https://github.com/leookun/cursor-byok/releases/latest/download/latest.json"
+        "https://github.com/GGboya/cursor-byok/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

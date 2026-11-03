@@ -1,4 +1,4 @@
-module github.com/leookun/cursor-byok/cursor-proto
+module github.com/GGboya/cursor-byok/cursor-proto
 
 go 1.25.8
 
