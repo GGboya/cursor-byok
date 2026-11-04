@@ -100,10 +100,10 @@ fn local_response() -> Result<Response<Body>> {
 
 fn enable_agent_retries(config: &mut Value) -> Result<()> {
     force_gate(config, AGENT_RETRIES_GATE, true)?;
-    // This server implements both agent protocols. Forcing the agent-host gate
-    // on keeps Cursor on the RunInference path deterministically instead of
-    // depending on Statsig rollout state.
-    force_gate(config, AGENT_HOST_GATE, true)?;
+    // TEMP: RunInference WS bridge needs a subprotocol-echoing 101 (hudsucker's
+    // hyper_tungstenite::upgrade(req, None) drops it); until patched, fall back
+    // to the legacy agent implementation which this server fully serves.
+    force_gate(config, AGENT_HOST_GATE, false)?;
     // The MITM cannot proxy the WebSocket run transport (wss://api2.cursor.sh/agent/v1/run).
     // Forcing this gate off keeps the harness on the connect emulation
     // (BidiAppend writes + RunSSE reads), which this server serves natively.
