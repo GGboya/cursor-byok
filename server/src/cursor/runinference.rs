@@ -129,6 +129,7 @@ pub async fn handle_append(
                         resolved_model: Some(resolved),
                         prompt_model_metadata: Some(metadata),
                         accepts_client_heartbeat: true,
+                        accepts_tool_call_events: true,
                         ..Default::default()
                     },
                 )),
@@ -154,6 +155,7 @@ pub async fn handle_append(
                 .get(request_id)
                 .map(|state| state.model.clone());
             let request = invoke.request.unwrap_or_default();
+            let batches = invoke.tool_call_batches.clone();
             let history_snapshot = {
                 let mut states = states().lock().await;
                 let Some(state) = states.get_mut(request_id) else {
@@ -193,6 +195,7 @@ pub async fn handle_append(
                 model.clone(),
                 &history_snapshot,
                 &request,
+                &batches,
             )?;
             // The agent harness sends the raw conversation and expects the
             // backend to supply the agent system prompt and its static toolset.
@@ -558,6 +561,7 @@ fn build_invocation(
     model: ModelSpec,
     messages: &[ri::InferenceCoreMessage],
     request: &ri::InferenceStreamRequest,
+    tool_call_batches: &Option<ri::RunInferenceToolCallBatch>,
 ) -> Result<ModelInvocation> {
     let mut instructions = String::new();
     let mut history = Vec::new();
@@ -603,13 +607,37 @@ fn build_invocation(
                 else {
                     return Err(Error::Protocol("tool message without content".into()));
                 };
-                let result = tool_result(tool_content);
-                history.push(ProjectedMessage {
-                    message_id: format!("ri-{request_id}-{position}"),
-                    role: Role::Tool,
-                    content: ProjectedContent::ToolResult(result),
-                });
+                for result in tool_results(tool_content) {
+                    history.push(ProjectedMessage {
+                        message_id: format!("ri-{request_id}-{position}-{}", result.call_id),
+                        role: Role::Tool,
+                        content: ProjectedContent::ToolResult(result),
+                    });
+                }
             }
+        }
+    }
+    // Tool outcomes may travel separately from the message stream
+    // (tool_call_batches on invoke_model). Merge them into the history so the
+    // following assistant turn sees completed tool results.
+    if let Some(batch) = tool_call_batches {
+        for event in &batch.tool_calls {
+            if event.tool_call_id.is_empty() {
+                continue;
+            }
+            let result = ToolResultContent {
+                call_id: event.tool_call_id.clone(),
+                name: event.tool_identifier.clone(),
+                content: String::new(),
+                is_error: !event.success,
+                image: None,
+                provider_parts: Vec::new(),
+            };
+            history.push(ProjectedMessage {
+                message_id: format!("ri-{request_id}-batch-{}", event.tool_call_id),
+                role: Role::Tool,
+                content: ProjectedContent::ToolResult(result),
+            });
         }
     }
     let tools = request
@@ -720,24 +748,45 @@ fn reasoning_text(message: &ri::InferenceCoreMessage) -> String {
         .join("")
 }
 
-fn tool_result(content: &ri::InferenceToolResultContent) -> ToolResultContent {
-    let mut result = ToolResultContent {
-        call_id: String::new(),
-        name: String::new(),
-        content: String::new(),
-        is_error: false,
-        image: None,
-        provider_parts: Vec::new(),
-    };
-    if let Some(parts) = content.parts.as_ref() {
-        result.call_id = parts.tool_call_id.clone();
-        result.name = parts.tool_name.clone();
-        result.is_error = parts.is_error;
-        if let Some(value) = parts.result.as_ref() {
+fn tool_results(content: &ri::InferenceToolResultContent) -> Vec<ToolResultContent> {
+    let mut results = Vec::new();
+    for part in &content.parts {
+        let mut result = ToolResultContent {
+            call_id: part.tool_call_id.clone(),
+            name: part.tool_name.clone(),
+            content: String::new(),
+            is_error: part.is_error,
+            image: None,
+            provider_parts: Vec::new(),
+        };
+        if let Some(value) = part.result.as_ref() {
             result.content = prost_value_to_string(value);
         }
+        if let Some(experimental) = part.experimental_content.as_ref() {
+            match experimental.part.as_ref() {
+                Some(ri::inference_content_part::Part::Text(text)) => {
+                    result.content = text.text.clone();
+                }
+                Some(ri::inference_content_part::Part::Image(image)) => {
+                    if let Ok(data) = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        image.data.as_bytes(),
+                    ) {
+                        result.provider_parts.push(ContentPart::Image {
+                            mime_type: image
+                                .mime_type
+                                .clone()
+                                .unwrap_or_else(|| "image/png".into()),
+                            data,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        results.push(result);
     }
-    result
+    results
 }
 
 fn prost_value_to_string(value: &prost_types::Value) -> String {

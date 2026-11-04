@@ -131,7 +131,7 @@ message InferenceToolResultPart {
   optional bool cursor_tool_call_is_error = 7;
 }
 message InferenceToolResultContent {
-  optional InferenceToolResultPart parts = 1;
+  repeated InferenceToolResultPart parts = 1;
 }
 message InferenceToolCall {
   string tool_call_id = 1;
