@@ -436,16 +436,19 @@ fn emit_event(
             ..Default::default()
         },
         ModelEvent::ToolCallArgumentsDelta { index, delta } => {
-            let (call_id, name) = calls
+            // tool_name MUST stay empty on deltas: the harness translates
+            // toolCallPart into tool-call-delta only when tool_name is empty;
+            // a non-empty name means tool-call-streaming-start.
+            let call_id = calls
                 .get(*index)
                 .or_else(|| calls.last())
-                .map(|(id, name, _)| (id.clone(), name.clone()))
+                .map(|(id, _, _)| id.clone())
                 .unwrap_or_default();
             ri::InferenceStreamResponse {
                 response: Some(ri::inference_stream_response::Response::ToolCallPart(
                     ri::InferenceToolCallStreamPart {
                         tool_call_id: call_id,
-                        tool_name: name,
+                        tool_name: String::new(),
                         args: delta.clone(),
                         is_complete: false,
                         tool_index: Some(*index as i32),
@@ -456,17 +459,17 @@ fn emit_event(
             }
         }
         ModelEvent::ToolCallEnd { index } => {
-            let (call_id, name) = calls
+            let (call_id, name, args) = calls
                 .get(*index)
                 .or_else(|| calls.last())
-                .map(|(id, name, _)| (id.clone(), name.clone()))
+                .cloned()
                 .unwrap_or_default();
             ri::InferenceStreamResponse {
                 response: Some(ri::inference_stream_response::Response::ToolCallPart(
                     ri::InferenceToolCallStreamPart {
                         tool_call_id: call_id,
                         tool_name: name,
-                        args: String::new(),
+                        args,
                         is_complete: true,
                         tool_index: Some(*index as i32),
                         call_signature: None,
