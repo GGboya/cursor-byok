@@ -156,6 +156,19 @@ pub async fn handle_append(
                 .map(|state| state.model.clone());
             let request = invoke.request.unwrap_or_default();
             let batches = invoke.tool_call_batches.clone();
+            if std::env::var_os("BYOK_RI_DUMP").is_some() {
+                let dump = format!(
+                    "/tmp/ri-invoke-{}-{}.bin",
+                    request_id.replace(['/', ':'], "_"),
+                    invoke.invocation_id
+                );
+                let _ = std::fs::write(&dump, request.encode_to_vec());
+                tracing::info!(path = %dump, "dumped invoke_model request");
+            }
+            // Each invoke_model carries the full authoritative message stream
+            // (every prior tool result re-sent). The server owns assistant
+            // turns: it synthesizes them from the tool_calls attached to the
+            // following TOOL message.
             let history_snapshot = {
                 let mut states = states().lock().await;
                 let Some(state) = states.get_mut(request_id) else {
@@ -163,8 +176,22 @@ pub async fn handle_append(
                         "RunInference invoke_model before run_request".into(),
                     ));
                 };
-                state.history.extend(request.messages.iter().cloned());
-                state.history.clone()
+                let mut history = Vec::new();
+                for message in &request.messages {
+                    let role = message.role;
+                    if role == ri::InferenceMessageRole::Tool as i32
+                        && !message.tool_calls.is_empty()
+                    {
+                        history.push(ri::InferenceCoreMessage {
+                            role: ri::InferenceMessageRole::Assistant as i32,
+                            tool_calls: message.tool_calls.clone(),
+                            ..Default::default()
+                        });
+                    }
+                    history.push(message.clone());
+                }
+                state.history = history.clone();
+                history
             };
             let model = model_spec(
                 request.requested_model.as_ref(),
@@ -298,26 +325,7 @@ pub async fn handle_append(
                         ),
                     },
                 );
-                if !tool_calls.is_empty() {
-                    // The harness sends only tool results next; the assistant
-                    // tool_use turn is the server's responsibility.
-                    let assistant = ri::InferenceCoreMessage {
-                        role: ri::InferenceMessageRole::Assistant as i32,
-                        tool_calls: tool_calls
-                            .into_iter()
-                            .map(|(call_id, name, arguments)| ri::InferenceToolCall {
-                                tool_call_id: call_id,
-                                tool_name: name,
-                                args: json_struct(&arguments),
-                                raw_tool_call_args: None,
-                            })
-                            .collect(),
-                        ..Default::default()
-                    };
-                    if let Some(state) = states().lock().await.get_mut(&request_id_for_task) {
-                        state.history.push(assistant);
-                    }
-                }
+
             });
         }
         ri::run_inference_client_message::Message::CancelInvocation(cancel) => {
@@ -579,7 +587,7 @@ fn build_invocation(
     model: ModelSpec,
     messages: &[ri::InferenceCoreMessage],
     request: &ri::InferenceStreamRequest,
-    tool_call_batches: &Option<ri::RunInferenceToolCallBatch>,
+    tool_call_batches: &[ri::RunInferenceToolCallBatch],
 ) -> Result<ModelInvocation> {
     let mut instructions = String::new();
     let mut history = Vec::new();
@@ -646,7 +654,7 @@ fn build_invocation(
             _ => None,
         })
         .collect();
-    if let Some(batch) = tool_call_batches {
+    for batch in tool_call_batches {
         for event in &batch.tool_calls {
             if event.tool_call_id.is_empty() || !seen_result_ids.insert(event.tool_call_id.clone()) {
                 continue;
@@ -791,7 +799,7 @@ fn tool_results(content: &ri::InferenceToolResultContent) -> Vec<ToolResultConte
         if let Some(value) = part.result.as_ref() {
             result.content = prost_value_to_string(value);
         }
-        if let Some(experimental) = part.experimental_content.as_ref() {
+        for experimental in &part.experimental_content {
             match experimental.part.as_ref() {
                 Some(ri::inference_content_part::Part::Text(text)) => {
                     result.content = text.text.clone();

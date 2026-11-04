@@ -2,7 +2,7 @@
 """Extract protobuf-es v2 compact type tables + Re() enums from agent-harness.cjs."""
 import re, sys
 
-SRC = "/Users/didi/Desktop/agent-harness-b951911e.quarantine/agent-harness.cjs"
+SRC = "/Users/didi/Library/Application Support/Cursor/agent-harness/versions/b951911e447652508ba64b4b209ceb5762710e1423deddf7082a6be93bca7cbc/agent-harness.cjs"
 src = open(SRC, encoding="utf8", errors="replace").read()
 
 wk_types = {}
@@ -84,7 +84,14 @@ for ci, m in enumerate(class_matches):
         if len(toks) < 3: ok = False; break
         no, name, typ = int(toks[0]), toks[1], toks[2]
         card = toks[3] if len(toks) > 3 else None
-        if typ.endswith('?') or typ.endswith('*'):
+        # protobuf-es v2 compact tables put the cardinality marker on the TYPE
+        # token (e.g. `1 messages #0*`, `2 name 9?`): `*` means repeated,
+        # `?` means optional. The previous parser treated every suffix as
+        # optional, silently collapsing repeated fields to a single value.
+        if typ.endswith('*'):
+            typ = typ[:-1]
+            if card is None or card == '?': card = '*'
+        elif typ.endswith('?'):
             typ = typ[:-1]
             if card is None: card = '?'
         fields.append((no, name, typ, card, refs))
