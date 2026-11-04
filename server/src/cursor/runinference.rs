@@ -39,6 +39,9 @@ struct RunState {
     model: ModelSpec,
     invocation: u64,
     cancellations: HashMap<String, CancellationToken>,
+    /// The harness sends only new messages per invocation; the server owns the
+    /// conversation history.
+    history: Vec<ri::InferenceCoreMessage>,
 }
 
 fn states() -> &'static Mutex<HashMap<String, RunState>> {
@@ -103,14 +106,28 @@ pub async fn handle_append(
                             model,
                             invocation: 0,
                             cancellations: HashMap::new(),
+                            history: Vec::new(),
                         },
                     );
             }
             let resolved = run.requested_model.clone().unwrap_or_default();
+            let metadata = ri::RunInferencePromptModelMetadata {
+                // Present GLM as a Claude-family model so the local loop picks an
+                // Anthropic-style prompt template; the BYOK provider speaks the
+                // Anthropic wire protocol anyway.
+                vendor: "anthropic".into(),
+                // prompt_version must be one of the client's known versions
+                // (dsv3-1018, dsv3-1205, cursor-0226, latest, gpt5-codex, ...).
+                prompt_version: "latest".into(),
+                is_claude_4x: true,
+                is_sonnet45: true,
+                ..Default::default()
+            };
             let ready = ri::RunInferenceServerMessage {
                 message: Some(ri::run_inference_server_message::Message::RunReady(
                     ri::RunInferenceRunReady {
                         resolved_model: Some(resolved),
+                        prompt_model_metadata: Some(metadata),
                         accepts_client_heartbeat: true,
                         ..Default::default()
                     },
@@ -137,6 +154,16 @@ pub async fn handle_append(
                 .get(request_id)
                 .map(|state| state.model.clone());
             let request = invoke.request.unwrap_or_default();
+            let history_snapshot = {
+                let mut states = states().lock().await;
+                let Some(state) = states.get_mut(request_id) else {
+                    return Err(Error::Protocol(
+                        "RunInference invoke_model before run_request".into(),
+                    ));
+                };
+                state.history.extend(request.messages.iter().cloned());
+                state.history.clone()
+            };
             let model = model_spec(
                 request.requested_model.as_ref(),
                 request.model_config.as_ref(),
@@ -159,13 +186,60 @@ pub async fn handle_append(
                 state.invocation += 1;
                 state.invocation
             };
-            let invocation = build_invocation(
+            let mut invocation = build_invocation(
                 request_id,
                 &conversation_id,
                 index,
-                model,
+                model.clone(),
+                &history_snapshot,
                 &request,
             )?;
+            // The agent harness sends the raw conversation and expects the
+            // backend to supply the agent system prompt and its static toolset.
+            if invocation.request.prompt.instructions.is_empty() {
+                if let Ok(spec) = registry
+                    .compiler()
+                    .prompt_spec(crate::cursor::prompting::Mode::Agent, &model, &[], false)
+                {
+                    invocation.request.prompt.instructions = spec.instructions;
+                    let existing: std::collections::HashSet<String> = invocation
+                        .request
+                        .prompt
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect();
+                    for tool in spec.tools {
+                        if !existing.contains(&tool.name) {
+                            invocation.request.prompt.tools.push(tool);
+                        }
+                    }
+                }
+            }
+            tracing::info!(
+                request_id,
+                invocation_id = %invoke.invocation_id,
+                instructions_chars = invocation.request.prompt.instructions.len(),
+                tools = invocation.request.prompt.tools.len(),
+                history = invocation.request.history.len(),
+                first_user_chars = invocation
+                    .request
+                    .history
+                    .iter()
+                    .find(|message| matches!(message.role, Role::User))
+                    .map(|message| match &message.content {
+                        ProjectedContent::Parts(parts) => parts
+                            .iter()
+                            .map(|part| match part {
+                                ContentPart::Text { text } => text.len(),
+                                _ => 0,
+                            })
+                            .sum::<usize>(),
+                        _ => 0,
+                    })
+                    .unwrap_or(0),
+                "RunInference invoke built"
+            );
             let cancellation = CancellationToken::new();
             if let Some(state) = states().lock().await.get_mut(request_id) {
                 state
@@ -174,10 +248,13 @@ pub async fn handle_append(
             }
             let handle = Arc::new(handle);
             let invocation_id_for_task = invocation_id.clone();
+            let request_id_for_task = request_id.to_owned();
             let provider = provider;
             tokio::spawn(async move {
                 let stream = provider.stream(invocation, cancellation);
                 tokio::pin!(stream);
+                // (call_id, name, accumulated argument JSON)
+                let mut tool_calls: Vec<(String, String, String)> = Vec::new();
                 while let Some(event) = stream.next().await {
                     let event = match event {
                         Ok(event) => event,
@@ -190,6 +267,17 @@ pub async fn handle_append(
                             break;
                         }
                     };
+                    match &event {
+                        ModelEvent::ToolCallStart { call_id, name, .. } => {
+                            tool_calls.push((call_id.clone(), name.clone(), String::new()));
+                        }
+                        ModelEvent::ToolCallArgumentsDelta { delta, .. } => {
+                            if let Some((_, _, arguments)) = tool_calls.last_mut() {
+                                arguments.push_str(delta);
+                            }
+                        }
+                        _ => {}
+                    }
                     if !emit_event(handle.as_ref(), &invocation_id_for_task, &event) {
                         break;
                     }
@@ -207,6 +295,26 @@ pub async fn handle_append(
                         ),
                     },
                 );
+                if !tool_calls.is_empty() {
+                    // The harness sends only tool results next; the assistant
+                    // tool_use turn is the server's responsibility.
+                    let assistant = ri::InferenceCoreMessage {
+                        role: ri::InferenceMessageRole::Assistant as i32,
+                        tool_calls: tool_calls
+                            .into_iter()
+                            .map(|(call_id, name, arguments)| ri::InferenceToolCall {
+                                tool_call_id: call_id,
+                                tool_name: name,
+                                args: json_struct(&arguments),
+                                raw_tool_call_args: None,
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    if let Some(state) = states().lock().await.get_mut(&request_id_for_task) {
+                        state.history.push(assistant);
+                    }
+                }
             });
         }
         ri::run_inference_client_message::Message::CancelInvocation(cancel) => {
@@ -448,11 +556,12 @@ fn build_invocation(
     conversation_id: &str,
     index: u64,
     model: ModelSpec,
+    messages: &[ri::InferenceCoreMessage],
     request: &ri::InferenceStreamRequest,
 ) -> Result<ModelInvocation> {
     let mut instructions = String::new();
     let mut history = Vec::new();
-    for (position, message) in request.messages.iter().enumerate() {
+    for (position, message) in messages.iter().enumerate() {
         let role = ri_role(message.role);
         match role {
             Role::System => {
@@ -595,8 +704,8 @@ fn content_parts(message: &ri::InferenceCoreMessage) -> Vec<ContentPart> {
         _ => {}
     }
     if parts.is_empty() {
-        if let Some(text) = message.assistant_text_parts.as_deref().filter(|t| !t.is_empty()) {
-            parts.push(ContentPart::Text { text: text.to_owned() });
+        for text in &message.assistant_text_parts {
+            parts.push(ContentPart::Text { text: text.clone() });
         }
     }
     parts
@@ -685,4 +794,48 @@ pub fn run_conversation_id(message: &ri::RunInferenceClientMessage) -> Option<St
         }
         _ => None,
     }
+}
+
+/// Cancels every invocation of a run (WebSocket cancel_run).
+pub async fn cancel_run(registry: &TransportRegistry, request_id: &str) {
+    let mut states = states().lock().await;
+    if let Some(state) = states.get_mut(request_id) {
+        for (_, token) in state.cancellations.drain() {
+            token.cancel();
+        }
+    }
+}
+
+
+/// Best-effort JSON -> Struct for recorded tool call arguments.
+fn json_struct(raw: &str) -> Option<prost_types::Struct> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some(json_to_struct(match value {
+        serde_json::Value::Object(map) => map,
+        _ => return None,
+    }))
+}
+
+fn json_to_struct(map: serde_json::Map<String, serde_json::Value>) -> prost_types::Struct {
+    prost_types::Struct {
+        fields: map
+            .into_iter()
+            .map(|(key, value)| (key, json_to_value(value)))
+            .collect(),
+    }
+}
+
+fn json_to_value(value: serde_json::Value) -> prost_types::Value {
+    use prost_types::value::Kind;
+    let kind = match value {
+        serde_json::Value::Null => Kind::NullValue(0),
+        serde_json::Value::Bool(flag) => Kind::BoolValue(flag),
+        serde_json::Value::Number(number) => Kind::NumberValue(number.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(text) => Kind::StringValue(text),
+        serde_json::Value::Array(items) => Kind::ListValue(prost_types::ListValue {
+            values: items.into_iter().map(json_to_value).collect(),
+        }),
+        serde_json::Value::Object(map) => Kind::StructValue(json_to_struct(map)),
+    };
+    prost_types::Value { kind: Some(kind) }
 }

@@ -70,7 +70,6 @@ impl ProxyRuntime {
             .with_ca(authority)
             .with_rustls_connector(aws_lc_rs::default_provider())
             .with_http_handler(CursorRelay { backend, tab_mode })
-            .with_websocket_handler(AgentRunWs { _backend: backend })
             .with_graceful_shutdown(async move {
                 let _ = done.await;
             })
@@ -124,23 +123,18 @@ impl HttpHandler for CursorRelay {
         mut request: Request<Body>,
     ) -> RequestOrResponse {
         let original = request.uri().clone();
-        if original.path() == "/agent/v1/run" {
-            tracing::info!(
-                host = original.host().unwrap_or_default(),
-                query = original.query().unwrap_or_default(),
-                upgrade = request.headers().get("upgrade").and_then(|v| v.to_str().ok()).unwrap_or_default(),
-                version = request.headers().get("sec-websocket-version").and_then(|v| v.to_str().ok()).unwrap_or_default(),
-                proto = request.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).unwrap_or_default(),
-                xreq = request.headers().get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or_default(),
-                "agent run WS handshake"
-            );
-        }
-        tracing::info!(
+        tracing::debug!(
             host = original.host().unwrap_or_default(),
             path = original.path(),
             method = %request.method(),
             "MITM request"
         );
+        if original.path() == "/agent/v1/run" && request.method() == hudsucker::hyper::Method::GET
+        {
+            if let Some(response) = serve_agent_run_ws(_ctx.client_addr, &mut request) {
+                return RequestOrResponse::Response(response);
+            }
+        }
         let locally_routed = should_route_locally(original.path(), *self.tab_mode.read());
         if is_cursor_host(original.host().unwrap_or_default()) && locally_routed {
             if let Ok(value) = original.to_string().parse() {
@@ -259,14 +253,11 @@ pub fn set_run_registry(registry: TransportRegistry) {
 }
 
 /// Serves Cursor's RunInference WebSocket runs (wss://api2.cursor.sh/agent/v1/run,
-/// subprotocol cursor-run-inference-preconnect-v1) from the local engine.
-/// Other WebSocket traffic (probe endpoints) is tunneled untouched.
-#[derive(Clone)]
-struct AgentRunWs {
-    _backend: SocketAddr,
-}
-
-const AGENT_RUN_WS_PATH: &str = "/agent/v1/run";
+/// subprotocol cursor-run-inference-preconnect-v1) straight from the local
+/// engine. The upgrade is answered locally because hudsucker's built-in
+/// WebSocket path drops the subprotocol from the 101, which makes the harness
+/// client close the socket immediately.
+const AGENT_RUN_WS_PROTOCOL: &str = "cursor-run-inference-preconnect-v1";
 
 fn ws_session_key(addr: SocketAddr) -> String {
     format!("ws-{addr}")
@@ -283,106 +274,190 @@ fn strip_envelope(data: &[u8]) -> &[u8] {
     data
 }
 
-type WsStream = dyn futures_util::Stream<
-    Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>,
-> + Unpin + Send;
+fn serve_agent_run_ws(
+    client_addr: SocketAddr,
+    request: &mut Request<Body>,
+) -> Option<hudsucker::hyper::Response<Body>> {
+    use hudsucker::hyper::{
+        header::{HeaderValue, CONNECTION, SEC_WEBSOCKET_PROTOCOL, UPGRADE},
+        upgrade::OnUpgrade,
+        StatusCode,
+    };
+    let on_upgrade = request.extensions_mut().remove::<OnUpgrade>()?;
+    let key = request
+        .headers()
+        .get("sec-websocket-key")?
+        .to_str()
+        .ok()?
+        .to_owned();
+    let mut response = hudsucker::hyper::Response::new(Body::empty());
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    let headers = response.headers_mut();
+    headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    headers.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+    headers.insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static(AGENT_RUN_WS_PROTOCOL),
+    );
+    headers.insert("sec-websocket-accept", ws_accept_key(&key));
+    let registry = RUN_REGISTRY.get().cloned()?;
+    tokio::spawn(bridge_agent_run_ws(
+        registry,
+        ws_session_key(client_addr),
+        on_upgrade,
+    ));
+    Some(response)
+}
 
-impl hudsucker::WebSocketHandler for AgentRunWs {
-    async fn handle_websocket(
-        mut self,
-        ctx: hudsucker::WebSocketContext,
-        mut stream: impl futures_util::Stream<
-                Item = Result<
-                    tokio_tungstenite::tungstenite::Message,
-                    tokio_tungstenite::tungstenite::Error,
-                >,
-            > + Unpin
-            + Send
-            + 'static,
-        mut sink: impl futures_util::Sink<
-                tokio_tungstenite::tungstenite::Message,
-                Error = tokio_tungstenite::tungstenite::Error,
-        > + Unpin
-        + Send
-        + 'static,
-    ) {
-        let Some(registry) = RUN_REGISTRY.get() else {
-            tunnel(stream, sink).await;
-            return;
+fn ws_accept_key(key: &str) -> hudsucker::hyper::header::HeaderValue {
+    use base64::Engine;
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(key.as_bytes());
+    hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    hudsucker::hyper::header::HeaderValue::from_str(
+        &base64::engine::general_purpose::STANDARD.encode(hasher.finalize()),
+    )
+    .expect("base64 accept key is a valid header value")
+}
+
+async fn bridge_agent_run_ws(
+    registry: TransportRegistry,
+    _key: String,
+    upgraded: hudsucker::hyper::upgrade::OnUpgrade,
+) {
+    use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+
+    use crate::cursor::protocol::proto::runinference::v1 as ri;
+
+    let Ok(upgraded) = upgraded.await else {
+        return;
+    };
+    let ws = WebSocketStream::from_raw_socket(
+        hudsucker::hyper_util::rt::TokioIo::new(upgraded),
+        Role::Server,
+        None,
+    )
+    .await;
+    let (mut sink, mut stream) = ws.split();
+    let (outbound, mut outbound_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let writer = tokio::spawn(async move {
+        while let Some(bytes) = outbound_rx.recv().await {
+            if sink
+                .send(tokio_tungstenite::tungstenite::Message::Binary(
+                    bytes::Bytes::from(bytes),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tracing::info!("RunInference WS session opened");
+    let mut run_request_ids: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    while let Some(Ok(message)) = stream.next().await {
+        let tokio_tungstenite::tungstenite::Message::Binary(data) = message else {
+            continue;
         };
-        match ctx {
-            hudsucker::WebSocketContext::ClientToServer { src, ref dst, .. }
-                if dst.path() == AGENT_RUN_WS_PATH =>
-            {
-                tracing::info!(session = %ws_session_key(src), "RunInference WS session opened");
-                let key = ws_session_key(src);
-                let mut seqno = 0i64;
-                while let Some(message) = stream.next().await {
-                    let Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) = message
-                    else {
-                        continue;
-                    };
-                    let payload = strip_envelope(&data);
-                    match ri::RunInferenceClientMessage::decode(payload) {
-                        Ok(message) => {
-                            let _ = runinference::handle_append(registry, &key, seqno, message).await;
-                            seqno += 1;
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "undecodable RunInference WS frame");
-                        }
-                    }
-                }
-                tracing::info!(session = %key, "RunInference WS session closed");
+        let frame = match ri::AgentWebSocketClientFrame::decode(strip_envelope(&data)) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(%error, "undecodable AgentWebSocket client frame");
+                continue;
             }
-            hudsucker::WebSocketContext::ServerToClient { ref src, dst, .. }
-                if src.path() == AGENT_RUN_WS_PATH =>
-            {
-                let key = ws_session_key(dst);
-                let Ok(handle) = registry.get_or_create(&key).await else {
-                    return;
+        };
+        match frame.frame {
+            Some(ri::agent_web_socket_client_frame::Frame::Hello(hello)) => {
+                let reply = ri::AgentWebSocketServerFrame {
+                    frame: Some(ri::agent_web_socket_server_frame::Frame::Hello(
+                        ri::AgentWebSocketHello {
+                            protocol_version: hello.protocol_version,
+                        },
+                    )),
                 };
-                let mut receiver = handle.subscribe();
-                while let Some(frame) = receiver.recv().await {
-                    if sink
-                        .send(tokio_tungstenite::tungstenite::Message::Binary(frame))
-                        .await
-                        .is_err()
-                    {
-                        break;
+                let _ = outbound.send(reply.encode_to_vec());
+            }
+            Some(ri::agent_web_socket_client_frame::Frame::RunStart(start)) => {
+                let Some(identity) = start.identity.clone() else {
+                    continue;
+                };
+                let run_id = identity.run_id.clone();
+                let request_id = identity.request_id.clone();
+                tracing::info!(run_id = %run_id, request_id = %request_id, "RunInference WS run start");
+                run_request_ids.insert(run_id.clone(), request_id.clone());
+                let reply = ri::AgentWebSocketServerFrame {
+                    frame: Some(ri::agent_web_socket_server_frame::Frame::RunAccepted(
+                        ri::AgentWebSocketRunAccepted {
+                            identity: Some(identity),
+                            headers: Vec::new(),
+                        },
+                    )),
+                };
+                let _ = outbound.send(reply.encode_to_vec());
+                if let Ok(handle) = registry.get_or_create(&request_id).await {
+                    let mut receiver = handle.subscribe();
+                    let outbound = outbound.clone();
+                    let run_id = run_id.to_owned();
+                    tokio::spawn(async move {
+                        let mut sequence = 0u64;
+                        while let Some(frame) = receiver.recv().await {
+                            let payload = strip_envelope(&frame).to_vec();
+                            let message = ri::AgentWebSocketServerFrame {
+                                frame: Some(
+                                    ri::agent_web_socket_server_frame::Frame::ServerMessage(
+                                        ri::AgentWebSocketServerMessage {
+                                            run_id: run_id.clone(),
+                                            sequence,
+                                            message: payload,
+                                        },
+                                    ),
+                                ),
+                            };
+                            sequence += 1;
+                            if outbound.send(message.encode_to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            }
+            Some(ri::agent_web_socket_client_frame::Frame::ClientMessage(client)) => {
+                let Some(request_id) = run_request_ids
+                    .get(&client.run_id)
+                    .map(String::as_str)
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let payload = strip_envelope(&client.message);
+                match ri::RunInferenceClientMessage::decode(payload) {
+                    Ok(message) => {
+                        let _ = runinference::handle_append(
+                            &registry,
+                            &request_id,
+                            client.sequence as i64,
+                            message,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "undecodable RunInference WS message");
                     }
                 }
             }
-            _ => tunnel(stream, sink).await,
+            Some(ri::agent_web_socket_client_frame::Frame::CancelRun(cancel)) => {
+                if let Some(request_id) = run_request_ids.get(&cancel.run_id) {
+                    runinference::cancel_run(&registry, request_id).await;
+                }
+            }
+            Some(ri::agent_web_socket_client_frame::Frame::HalfClose(_)) => {}
+            None => {}
         }
     }
+    tracing::info!("RunInference WS session closed");
+    writer.abort();
 }
 
-async fn tunnel<S, K>(mut stream: S, mut sink: K)
-where
-    S: futures_util::Stream<
-            Item = Result<
-                tokio_tungstenite::tungstenite::Message,
-                tokio_tungstenite::tungstenite::Error,
-            >,
-        > + Unpin
-        + Send
-        + 'static,
-    K: futures_util::Sink<
-            tokio_tungstenite::tungstenite::Message,
-            Error = tokio_tungstenite::tungstenite::Error,
-        > + Unpin
-        + Send
-        + 'static,
-{
-    while let Some(message) = stream.next().await {
-        match message {
-            Ok(message) => {
-                if sink.send(message).await.is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-}

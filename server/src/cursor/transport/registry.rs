@@ -140,6 +140,11 @@ impl TransportRegistry {
         self.inner.conversations.dependencies().provider.clone()
     }
 
+    /// Prompt compiler used to fill agent system prompts for RunInference runs.
+    pub fn compiler(&self) -> crate::cursor::prompting::PromptCompiler {
+        self.inner.conversations.dependencies().compiler.clone()
+    }
+
     pub fn trace(
         &self,
         request_id: &str,
