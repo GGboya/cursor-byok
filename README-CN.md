@@ -4,7 +4,11 @@
 
 cursor-byok 是一个运行在本机的 Cursor 模型网关，帮助你在 Cursor 中使用自己配置的模型服务。
 
-> **持续维护的 fork。** 上游仓库 [leookun/cursor-byok](https://github.com/leookun/cursor-byok) 自 2026-10-28 起停止更新，维护与 Cursor 兼容性修复在此继续（首个 fork 提交：修复 Cursor 3.27.6 agent-harness 滚更导致的 BYOK 失效）。原始项目的全部功劳归属于 [@leookun](https://github.com/leookun)，见 [LICENSE](./LICENSE)。
+> **独立维护中。** 上游仓库 [leookun/cursor-byok](https://github.com/leookun/cursor-byok) **已归档**（自 2026-10-28 停止更新）。本 fork 现为维护主线：后续开发、Cursor 兼容性适配与发布均在此进行。目前已完成：
+> - **Cursor 3.27+ / 3.28 agent-harness 支持**：原生实现 RunInference 引擎（WebSocket run 通道 `agent/v1/run`、`AgentWebSocket*` 帧协议、工具调用流式、提示词装配）——新版 local-loop agent 同样能走自己的 BYOK Provider，不再仅限旧版 `AgentService` 流程
+> - 长生命周期 HTTP client 的系统代理切换容错
+>
+> 原始项目的全部功劳归属于 [@leookun](https://github.com/leookun)，见 [LICENSE](./LICENSE)。
 
 [English README](./README.md) · [使用指南](https://docs.leokun.cn) · [下载](https://github.com/GGboya/cursor-byok/releases/latest) · [提交问题](https://github.com/GGboya/cursor-byok/issues)
 

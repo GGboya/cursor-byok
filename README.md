@@ -5,7 +5,11 @@ cursor-byok is a local implementation of Cursor's backend.
 <br>
 <br>
 
-> **Actively maintained fork.** The upstream repository [leookun/cursor-byok](https://github.com/leookun/cursor-byok) has been inactive since 2026-10-28; maintenance and Cursor-compatibility fixes continue here (first fork commit: keep BYOK working on the Cursor 3.27.6 agent-harness rollout). All credit for the original project belongs to [@leookun](https://github.com/leookun) — see [LICENSE](./LICENSE).
+> **Independently maintained.** The upstream repository [leookun/cursor-byok](https://github.com/leookun/cursor-byok) has been **archived** (inactive since 2026-10-28). This fork is now the maintenance line: all further development, Cursor-compatibility work and releases happen here. Highlights so far:
+> - **Cursor 3.27+ / 3.28 agent-harness support**: native RunInference engine (WebSocket run channel `agent/v1/run`, `AgentWebSocket*` framing, tool-call streaming, prompt assembly) — BYOK providers serve the new local-loop agent, not just the legacy `AgentService` flow
+> - System-proxy change resilience for long-lived HTTP clients
+>
+> All credit for the original project belongs to [@leookun](https://github.com/leookun) — see [LICENSE](./LICENSE).
 <br>
 <br>
 
