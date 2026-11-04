@@ -15,6 +15,7 @@ use crate::{api::cursor::proxy, Error, Result};
 pub const BOOTSTRAP_STATSIG_PATH: &str = "/aiserver.v1.AnalyticsService/BootstrapStatsig";
 const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
 const AGENT_HOST_GATE: &str = "cursor_agent_host";
+const WEBSOCKET_CLIENT_GATE: &str = "nal_websocket_client";
 const LOCAL_RULE: &str = "local_enabled";
 
 #[derive(Clone, PartialEq, Message)]
@@ -102,7 +103,11 @@ fn enable_agent_retries(config: &mut Value) -> Result<()> {
     // This server implements both agent protocols. Forcing the agent-host gate
     // on keeps Cursor on the RunInference path deterministically instead of
     // depending on Statsig rollout state.
-    force_gate(config, AGENT_HOST_GATE, true)
+    force_gate(config, AGENT_HOST_GATE, true)?;
+    // The MITM cannot proxy the WebSocket run transport (wss://api2.cursor.sh/agent/v1/run).
+    // Forcing this gate off keeps the harness on the connect emulation
+    // (BidiAppend writes + RunSSE reads), which this server serves natively.
+    force_gate(config, WEBSOCKET_CLIENT_GATE, false)
 }
 
 fn force_gate(config: &mut Value, gate: &str, value: bool) -> Result<()> {

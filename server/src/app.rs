@@ -60,6 +60,7 @@ impl App {
             plugins.clone(),
             crate::config::managed_data_dir()?.join("rules"),
         );
+        crate::local_app::proxy::set_run_registry(registry.clone());
         let control = control::ControlService::new(
             store.clone(),
             provider,

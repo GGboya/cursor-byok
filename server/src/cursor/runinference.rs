@@ -676,3 +676,13 @@ fn prost_types_to_json(value: &prost_types::Value) -> serde_json::Value {
         None => serde_json::Value::Null,
     }
 }
+
+/// Conversation id of a RunInference message, for tracing.
+pub fn run_conversation_id(message: &ri::RunInferenceClientMessage) -> Option<String> {
+    match message.message.as_ref()? {
+        ri::run_inference_client_message::Message::RunRequest(run) => {
+            (!run.conversation_id.is_empty()).then(|| run.conversation_id.clone())
+        }
+        _ => None,
+    }
+}

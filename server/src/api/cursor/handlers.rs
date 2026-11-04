@@ -3,7 +3,7 @@ use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{DefaultBodyLimit, Extension, State},
     http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode},
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use tower_http::decompression::RequestDecompressionLayer;
@@ -46,6 +46,11 @@ fn router_with_proxy(
     let free_entitlements = FreeEntitlementCache::default();
     Router::new()
         .route("/__byok-api__/healthz", get(health))
+        // The MITM cannot proxy WebSocket upgrades. Failing these probes and
+        // dials locally makes Cursor fall back to the connect RunSSE transport,
+        // which this server serves natively.
+        .route("/ws-reachability-probe", any(ws_unavailable))
+        .route("/agent/v1/run", any(ws_unavailable))
         .route("/agent.v1.AgentService/RunSSE", post(run_sse_handler))
         .route("/aiserver.v1.BidiService/BidiAppend", post(bidi_handler))
         .route(
@@ -171,6 +176,10 @@ async fn health() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+async fn ws_unavailable() -> StatusCode {
+    StatusCode::SERVICE_UNAVAILABLE
+}
+
 /// `NetworkService/IsConnected` probe. Cursor's always-local extension checks
 /// connectivity roughly 10s after any slow request starts; a 404/error here is
 /// treated as "network disconnected" and aborts in-flight work (e.g. commit
@@ -195,6 +204,7 @@ async fn run_sse_handler(
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: agent::BidiRequestId = connect::decode_unary(&body)?;
+    tracing::info!(request_id = %request.request_id, "RunSSE subscribe");
     let route = registry.wait_route(&request.request_id).await;
     let trace = registry.trace(&request.request_id);
     trace.resume();
@@ -276,6 +286,18 @@ async fn runinference_append(
         )
         .await;
     }
+    let trace = registry.trace(&request_id);
+    if model_id.is_some() {
+        let conversation_id = crate::cursor::runinference::run_conversation_id(&message);
+        trace.begin(
+            conversation_id.as_deref(),
+            "local_byok",
+            model_id.as_deref(),
+        );
+    } else {
+        trace.resume();
+    }
+    trace.request("runinference_bidi", body, serde_json::json!({}));
     crate::cursor::runinference::handle_append(&registry, &request_id, seqno, message).await?;
     let mut response = Response::new(axum::body::Body::empty());
     *response.status_mut() = StatusCode::OK;

@@ -9,11 +9,21 @@ use hudsucker::{
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
+use std::sync::OnceLock;
+
+use prost::Message as _;
+
+use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 
 use crate::{
-    api::cursor::proxy::UPSTREAM_URL_HEADER, cursor::services::tab::is_tab_path, store::TabMode,
-    Error, Result,
+    api::cursor::proxy::UPSTREAM_URL_HEADER,
+    cursor::{
+        protocol::proto::runinference::v1 as ri,
+        runinference,
+        transport::TransportRegistry,
+    },
+    cursor::services::tab::is_tab_path, store::TabMode, Error, Result,
 };
 
 use super::ca::LoadedCa;
@@ -60,6 +70,7 @@ impl ProxyRuntime {
             .with_ca(authority)
             .with_rustls_connector(aws_lc_rs::default_provider())
             .with_http_handler(CursorRelay { backend, tab_mode })
+            .with_websocket_handler(AgentRunWs { _backend: backend })
             .with_graceful_shutdown(async move {
                 let _ = done.await;
             })
@@ -113,6 +124,23 @@ impl HttpHandler for CursorRelay {
         mut request: Request<Body>,
     ) -> RequestOrResponse {
         let original = request.uri().clone();
+        if original.path() == "/agent/v1/run" {
+            tracing::info!(
+                host = original.host().unwrap_or_default(),
+                query = original.query().unwrap_or_default(),
+                upgrade = request.headers().get("upgrade").and_then(|v| v.to_str().ok()).unwrap_or_default(),
+                version = request.headers().get("sec-websocket-version").and_then(|v| v.to_str().ok()).unwrap_or_default(),
+                proto = request.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).unwrap_or_default(),
+                xreq = request.headers().get("x-request-id").and_then(|v| v.to_str().ok()).unwrap_or_default(),
+                "agent run WS handshake"
+            );
+        }
+        tracing::info!(
+            host = original.host().unwrap_or_default(),
+            path = original.path(),
+            method = %request.method(),
+            "MITM request"
+        );
         let locally_routed = should_route_locally(original.path(), *self.tab_mode.read());
         if is_cursor_host(original.host().unwrap_or_default()) && locally_routed {
             if let Ok(value) = original.to_string().parse() {
@@ -217,6 +245,144 @@ mod tests {
             "/auth/stripe_profile",
         ] {
             assert!(is_local_path(path), "{path} must not reach Cursor upstream");
+        }
+    }
+}
+
+
+static RUN_REGISTRY: OnceLock<TransportRegistry> = OnceLock::new();
+
+/// Shares the transport registry with the MITM WebSocket bridge. The registry
+/// is created after the harness in app startup, so it is wired in once ready.
+pub fn set_run_registry(registry: TransportRegistry) {
+    let _ = RUN_REGISTRY.set(registry);
+}
+
+/// Serves Cursor's RunInference WebSocket runs (wss://api2.cursor.sh/agent/v1/run,
+/// subprotocol cursor-run-inference-preconnect-v1) from the local engine.
+/// Other WebSocket traffic (probe endpoints) is tunneled untouched.
+#[derive(Clone)]
+struct AgentRunWs {
+    _backend: SocketAddr,
+}
+
+const AGENT_RUN_WS_PATH: &str = "/agent/v1/run";
+
+fn ws_session_key(addr: SocketAddr) -> String {
+    format!("ws-{addr}")
+}
+
+/// Strips a connect 5-byte envelope (flags + BE length) when present.
+fn strip_envelope(data: &[u8]) -> &[u8] {
+    if data.len() > 5 && data[0] & 0xFE == 0 {
+        let length = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+        if length == data.len() - 5 {
+            return &data[5..];
+        }
+    }
+    data
+}
+
+type WsStream = dyn futures_util::Stream<
+    Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>,
+> + Unpin + Send;
+
+impl hudsucker::WebSocketHandler for AgentRunWs {
+    async fn handle_websocket(
+        mut self,
+        ctx: hudsucker::WebSocketContext,
+        mut stream: impl futures_util::Stream<
+                Item = Result<
+                    tokio_tungstenite::tungstenite::Message,
+                    tokio_tungstenite::tungstenite::Error,
+                >,
+            > + Unpin
+            + Send
+            + 'static,
+        mut sink: impl futures_util::Sink<
+                tokio_tungstenite::tungstenite::Message,
+                Error = tokio_tungstenite::tungstenite::Error,
+        > + Unpin
+        + Send
+        + 'static,
+    ) {
+        let Some(registry) = RUN_REGISTRY.get() else {
+            tunnel(stream, sink).await;
+            return;
+        };
+        match ctx {
+            hudsucker::WebSocketContext::ClientToServer { src, ref dst, .. }
+                if dst.path() == AGENT_RUN_WS_PATH =>
+            {
+                tracing::info!(session = %ws_session_key(src), "RunInference WS session opened");
+                let key = ws_session_key(src);
+                let mut seqno = 0i64;
+                while let Some(message) = stream.next().await {
+                    let Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) = message
+                    else {
+                        continue;
+                    };
+                    let payload = strip_envelope(&data);
+                    match ri::RunInferenceClientMessage::decode(payload) {
+                        Ok(message) => {
+                            let _ = runinference::handle_append(registry, &key, seqno, message).await;
+                            seqno += 1;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "undecodable RunInference WS frame");
+                        }
+                    }
+                }
+                tracing::info!(session = %key, "RunInference WS session closed");
+            }
+            hudsucker::WebSocketContext::ServerToClient { ref src, dst, .. }
+                if src.path() == AGENT_RUN_WS_PATH =>
+            {
+                let key = ws_session_key(dst);
+                let Ok(handle) = registry.get_or_create(&key).await else {
+                    return;
+                };
+                let mut receiver = handle.subscribe();
+                while let Some(frame) = receiver.recv().await {
+                    if sink
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(frame))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+            _ => tunnel(stream, sink).await,
+        }
+    }
+}
+
+async fn tunnel<S, K>(mut stream: S, mut sink: K)
+where
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin
+        + Send
+        + 'static,
+    K: futures_util::Sink<
+            tokio_tungstenite::tungstenite::Message,
+            Error = tokio_tungstenite::tungstenite::Error,
+        > + Unpin
+        + Send
+        + 'static,
+{
+    while let Some(message) = stream.next().await {
+        match message {
+            Ok(message) => {
+                if sink.send(message).await.is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }

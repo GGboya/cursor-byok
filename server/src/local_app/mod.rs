@@ -2,7 +2,7 @@
 mod account;
 mod ca;
 mod process;
-mod proxy;
+pub mod proxy;
 mod settings;
 
 use std::{net::SocketAddr, sync::Arc};
