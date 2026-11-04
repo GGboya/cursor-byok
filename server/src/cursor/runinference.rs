@@ -281,7 +281,7 @@ pub async fn handle_append(
                         }
                         _ => {}
                     }
-                    if !emit_event(handle.as_ref(), &invocation_id_for_task, &event) {
+                    if !emit_event(handle.as_ref(), &invocation_id_for_task, &event, &tool_calls) {
                         break;
                     }
                 }
@@ -394,6 +394,7 @@ fn emit_event(
     handle: &crate::cursor::transport::TransportHandle,
     invocation_id: &str,
     event: &ModelEvent,
+    calls: &[(String, String, String)],
 ) -> bool {
     let response = match event {
         ModelEvent::Start { .. } => return true,
@@ -434,32 +435,46 @@ fn emit_event(
             )),
             ..Default::default()
         },
-        ModelEvent::ToolCallArgumentsDelta { index, delta } => ri::InferenceStreamResponse {
-            response: Some(ri::inference_stream_response::Response::ToolCallPart(
-                ri::InferenceToolCallStreamPart {
-                    tool_call_id: String::new(),
-                    tool_name: String::new(),
-                    args: delta.clone(),
-                    is_complete: false,
-                    tool_index: Some(*index as i32),
-                    call_signature: None,
-                },
-            )),
-            ..Default::default()
-        },
-        ModelEvent::ToolCallEnd { index } => ri::InferenceStreamResponse {
-            response: Some(ri::inference_stream_response::Response::ToolCallPart(
-                ri::InferenceToolCallStreamPart {
-                    tool_call_id: String::new(),
-                    tool_name: String::new(),
-                    args: String::new(),
-                    is_complete: true,
-                    tool_index: Some(*index as i32),
-                    call_signature: None,
-                },
-            )),
-            ..Default::default()
-        },
+        ModelEvent::ToolCallArgumentsDelta { index, delta } => {
+            let (call_id, name) = calls
+                .get(*index)
+                .or_else(|| calls.last())
+                .map(|(id, name, _)| (id.clone(), name.clone()))
+                .unwrap_or_default();
+            ri::InferenceStreamResponse {
+                response: Some(ri::inference_stream_response::Response::ToolCallPart(
+                    ri::InferenceToolCallStreamPart {
+                        tool_call_id: call_id,
+                        tool_name: name,
+                        args: delta.clone(),
+                        is_complete: false,
+                        tool_index: Some(*index as i32),
+                        call_signature: None,
+                    },
+                )),
+                ..Default::default()
+            }
+        }
+        ModelEvent::ToolCallEnd { index } => {
+            let (call_id, name) = calls
+                .get(*index)
+                .or_else(|| calls.last())
+                .map(|(id, name, _)| (id.clone(), name.clone()))
+                .unwrap_or_default();
+            ri::InferenceStreamResponse {
+                response: Some(ri::inference_stream_response::Response::ToolCallPart(
+                    ri::InferenceToolCallStreamPart {
+                        tool_call_id: call_id,
+                        tool_name: name,
+                        args: String::new(),
+                        is_complete: true,
+                        tool_index: Some(*index as i32),
+                        call_signature: None,
+                    },
+                )),
+                ..Default::default()
+            }
+        }
         ModelEvent::ProviderReplayState(_) => return true,
         ModelEvent::Usage(usage) => ri::InferenceStreamResponse {
             response: Some(ri::inference_stream_response::Response::ExtendedUsage(
@@ -751,6 +766,9 @@ fn reasoning_text(message: &ri::InferenceCoreMessage) -> String {
 fn tool_results(content: &ri::InferenceToolResultContent) -> Vec<ToolResultContent> {
     let mut results = Vec::new();
     for part in &content.parts {
+        if part.tool_call_id.is_empty() {
+            continue;
+        }
         let mut result = ToolResultContent {
             call_id: part.tool_call_id.clone(),
             name: part.tool_name.clone(),
