@@ -637,10 +637,18 @@ fn build_invocation(
     }
     // Tool outcomes may travel separately from the message stream
     // (tool_call_batches on invoke_model). Merge them into the history so the
-    // following assistant turn sees completed tool results.
+    // following assistant turn sees completed tool results, but never twice:
+    // the same outcome can arrive both as message parts and as batch events.
+    let mut seen_result_ids: std::collections::HashSet<String> = history
+        .iter()
+        .filter_map(|message| match &message.content {
+            ProjectedContent::ToolResult(result) => Some(result.call_id.clone()),
+            _ => None,
+        })
+        .collect();
     if let Some(batch) = tool_call_batches {
         for event in &batch.tool_calls {
-            if event.tool_call_id.is_empty() {
+            if event.tool_call_id.is_empty() || !seen_result_ids.insert(event.tool_call_id.clone()) {
                 continue;
             }
             let result = ToolResultContent {
